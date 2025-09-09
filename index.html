@@ -1,55 +1,299 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Quiz VR - Sólidos Geométricos</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Quiz VR com Tela Inicial Interativa</title>
   <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
   <style>
-    body { margin:0; padding:0; overflow:hidden; background:#222; }
-    #start-button {
-      position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
-      padding:15px 30px; font-size:20px; background:#4CAF50; color:#fff;
-      border:none; border-radius:5px; cursor:pointer; z-index:1000;
-    }
+    body { margin: 0; background: #000; }
   </style>
+
+  <script>
+    /* ---------------------------
+       COMPONENTES E FUNÇÕES GLOBAIS
+       --------------------------- */
+
+    // Gira objetos lentamente
+    AFRAME.registerComponent('rotate', {
+      schema: { speed: { type: 'number', default: 0.3 } },
+      tick: function (time, deltaTime) {
+        this.el.object3D.rotation.y += (deltaTime / 1000) * this.data.speed;
+      }
+    });
+
+    // Wireframe (arestas)
+    AFRAME.registerComponent('wireframe', {
+      schema: { color: { type: 'string', default: 'white' } },
+      init: function () {
+        const mesh = this.el.getObject3D('mesh');
+        if (!mesh || !mesh.geometry) return;
+        // Clonar geometria para segurança
+        const geometry = mesh.geometry.clone();
+        const wireframe = new THREE.WireframeGeometry(geometry);
+        const line = new THREE.LineSegments(wireframe);
+        line.material.depthTest = false;
+        line.material.opacity = 0.5;
+        line.material.transparent = true;
+        line.material.color = new THREE.Color(this.data.color);
+        this.el.object3D.add(line);
+      }
+    });
+
+    // Achata o sólido se o cursor ficar sobre ele por 2s
+    AFRAME.registerComponent('flatten-on-hover', {
+      init: function () {
+        let timeout;
+        const el = this.el;
+        const originalScale = el.getAttribute('scale') || '2 2 2';
+        el.addEventListener('mouseenter', () => {
+          timeout = setTimeout(() => {
+            el.setAttribute('scale', '2 0.01 2'); // achata no eixo Y
+          }, 2000);
+        });
+        el.addEventListener('mouseleave', () => {
+          clearTimeout(timeout);
+          el.setAttribute('scale', originalScale);
+        });
+      }
+    });
+
+    // Seleciona o objeto quando olhar por 2s (gaze)
+    AFRAME.registerComponent('select-on-hover', {
+      schema: { target: { type: 'string' } },
+      init: function () {
+        let timeout;
+        const data = this.data;
+        this.el.addEventListener('mouseenter', () => {
+          timeout = setTimeout(() => {
+            // Esconde todos os modelos e limpa filhos (vértices) anteriores
+            const models = document.querySelectorAll('.model');
+            models.forEach(model => {
+              model.setAttribute('visible', false);
+              // remove filhos (vértices) — innerHTML limpa entitades filhas
+              model.innerHTML = '';
+            });
+
+            // Exibe o modelo selecionado no centro
+            const selectedModel = document.querySelector(`#${data.target}`);
+            if (!selectedModel) return;
+            selectedModel.setAttribute('visible', true);
+            selectedModel.setAttribute('scale', '2 2 2');
+            selectedModel.setAttribute('position', '0 1.5 -3');
+            selectedModel.setAttribute('rotate', 'speed: 0.3');
+            selectedModel.setAttribute('wireframe', 'color: white');
+            // Adiciona flatten-on-hover (para poder achatar)
+            selectedModel.setAttribute('flatten-on-hover', '');
+
+            // Exibe informações e destaca vértices (com retry se mesh ainda não criado)
+            displaySolidInfo(data.target);
+            highlightVerticesWithRetry(selectedModel, 8, 60); // tenta várias vezes
+          }, 2000); // 2s de gaze para selecionar
+        });
+        this.el.addEventListener('mouseleave', () => {
+          clearTimeout(timeout);
+        });
+      }
+    });
+
+    // Mostra dados do sólido no texto #solid-info
+    function displaySolidInfo(type) {
+      const infoEntity = document.querySelector('#solid-info');
+      const solidsData = {
+        tetrahedron: { faces: 4, vertices: 4, edges: 6 },
+        cube: { faces: 6, vertices: 8, edges: 12 },
+        cone: { faces: 2, vertices: 1, edges: 1 },        // simplificado (base + superfície)
+        sphere: { faces: '—', vertices: '—', edges: '—' }, // esfera curva
+        cylinder: { faces: 3, vertices: '—', edges: '—' }  // duas bases + superfície lateral
+      };
+      const data = solidsData[type];
+      if (data) {
+        infoEntity.setAttribute('value',
+          `Faces: ${data.faces}\nVértices: ${data.vertices}\nArestas: ${data.edges}`);
+      } else {
+        infoEntity.setAttribute('value', '');
+      }
+    }
+
+    // Destaca vértices criando pequenas esferas — com retry se mesh ainda não estiver pronto
+    function highlightVerticesWithRetry(el, attempts = 6, delay = 80) {
+      let tries = 0;
+      const tryAdd = () => {
+        tries++;
+        const mesh = el.getObject3D('mesh');
+        if (mesh && mesh.geometry && mesh.geometry.attributes && mesh.geometry.attributes.position) {
+          // Adiciona spheres nos vértices
+          const pos = mesh.geometry.attributes.position;
+          for (let i = 0; i < pos.count; i++) {
+            const vx = pos.getX(i);
+            const vy = pos.getY(i);
+            const vz = pos.getZ(i);
+            const s = document.createElement('a-sphere');
+            s.setAttribute('position', `${vx} ${vy} ${vz}`);
+            s.setAttribute('radius', '0.05');
+            s.setAttribute('color', 'yellow');
+            // adicionar como filho do el (vai respeitar transformações)
+            el.appendChild(s);
+          }
+          return;
+        }
+        if (tries < attempts) {
+          setTimeout(tryAdd, delay);
+        }
+      };
+      tryAdd();
+    }
+
+    // Recentraliza a visão "seco" (sem suavização)
+    function resetarVisao() {
+      const camera = document.querySelector('#camera');
+      if (!camera) return;
+      const lc = camera.components && camera.components['look-controls'];
+      if (lc && lc.pitchObject && lc.yawObject) {
+        lc.pitchObject.rotation.x = 0;
+        lc.yawObject.rotation.y = 0;
+      } else {
+        camera.setAttribute('rotation', '0 0 0');
+      }
+      // garante rig na posição esperada
+      const rig = document.querySelector('#cameraRig');
+      if (rig) rig.setAttribute('position', '0 1.6 0');
+    }
+
+  </script>
 </head>
 <body>
-  <button id="start-button">Iniciar Quiz</button>
-
   <a-scene>
-    <a-sky color="#6e9cff"></a-sky>
+    <!-- Assets (imagens do quiz e panorama) -->
+    <a-assets>
+      <img id="panorama" src="panorama.jpeg">
+      <img id="final-img" src="figpage/final.png">
 
+      <!-- P1 -->
+      <img id="p1" src="figpage/pergunta1.png">
+      <img id="q1a" src="figpage/q1a.png">
+      <img id="q1b" src="figpage/q1b.png">
+      <img id="q1c" src="figpage/q1c.png">
+      <img id="q1d" src="figpage/q1d.png">
+
+      <!-- P2 -->
+      <img id="p2" src="figpage/pergunta2.png">
+      <img id="q2a" src="figpage/q2a.png">
+      <img id="q2b" src="figpage/q2b.png">
+      <img id="q2c" src="figpage/q2c.png">
+      <img id="q2d" src="figpage/q2d.png">
+
+      <!-- P3 -->
+      <img id="p3" src="figpage/pergunta3.png">
+      <img id="q3a" src="figpage/q3a.png">
+      <img id="q3b" src="figpage/q3b.png">
+      <img id="q3c" src="figpage/q3c.png">
+      <img id="q3d" src="figpage/q3d.png">
+
+      <!-- P4 -->
+      <img id="p4" src="figpage/pergunta4.png">
+      <img id="q4a" src="figpage/q4a.png">
+      <img id="q4b" src="figpage/q4b.png">
+      <img id="q4c" src="figpage/q4c.png">
+      <img id="q4d" src="figpage/q4d.png">
+
+      <!-- P5 -->
+      <img id="p5" src="figpage/pergunta5.png">
+      <img id="q5a" src="figpage/q5a.png">
+      <img id="q5b" src="figpage/q5b.png">
+      <img id="q5c" src="figpage/q5c.png">
+      <img id="q5d" src="figpage/q5d.png">
+
+      <!-- P6 -->
+      <img id="p6" src="figpage/pergunta6.png">
+      <img id="q6a" src="figpage/q6a.png">
+      <img id="q6b" src="figpage/q6b.png">
+      <img id="q6c" src="figpage/q6c.png">
+      <img id="q6d" src="figpage/q6d.png">
+    </a-assets>
+
+    <!-- Fundo 360 (use uma imagem equiretangular 2:1 para não distorcer) -->
+    <a-sky src="#panorama" rotation="0 -130 0"></a-sky>
+
+    <!-- Câmera + cursor -->
     <a-entity id="cameraRig" position="0 1.6 0">
       <a-camera id="camera" look-controls>
-        <!-- Cursor gaze -->
-        <a-cursor id="cursor" fuse="true" fuseTimeout="2000" color="#FFF"></a-cursor>
+        <a-cursor id="cursor"
+                  fuse="true"
+                  fuse-timeout="1500"
+                  color="yellow"
+                  raycaster="objects: .clickable">
+        </a-cursor>
 
-        <!-- Placar no HUD -->
+        <!-- HUD placar (aparece só no quiz) -->
         <a-entity id="scoreLabel"
-          text="value: Placar: 0; align: left; color: yellow; width: 2"
-          position="-1.2 0.8 -1.5">
+                  text="value: Placar: 0; align: left; color: yellow; width: 2"
+                  position="-1.2 0.8 -1.5"
+                  visible="false">
         </a-entity>
       </a-camera>
     </a-entity>
 
-    <!-- Container do Quiz -->
-    <a-entity id="quiz-container" position="0 2.9 -4" visible="false">
-      <!-- Pergunta -->
-      <a-image id="pergunta-img" position="0 1.5 0" width="3.5" height="1.2"></a-image>
+    <!-- ===================== TELA INICIAL INTERATIVA ===================== -->
+    <a-entity id="tela-inicial">
+      <!-- Linha de escolhas (gaze para selecionar por 2s) -->
+      <a-entity position="-6 2 -5" select-on-hover="target: tetrahedron" class="clickable">
+        <a-entity geometry="primitive: tetrahedron" material="color: #FF0000; opacity: 0.6" rotate wireframe></a-entity>
+        <a-text value="Tetraedro" align="center" position="0 -1 0" color="white"></a-text>
+      </a-entity>
 
-      <!-- Opções -->
-      <a-entity id="opcoes" position="0 -0.5 0"></a-entity>
+      <a-entity position="-3 2 -5" select-on-hover="target: cube" class="clickable">
+        <a-entity geometry="primitive: box" material="color: #00FF00; opacity: 0.6" rotate wireframe></a-entity>
+        <a-text value="Cubo" align="center" position="0 -1 0" color="white"></a-text>
+      </a-entity>
 
-      <!-- Mensagem de feedback -->
-      <a-entity id="feedbackLabel"
-        text="value: ; align: center; color: white; width: 3"
-        position="0 -2 0">
+      <a-entity position="0 2 -5" select-on-hover="target: cone" class="clickable">
+        <a-entity geometry="primitive: cone" material="color: #0000FF; opacity: 0.6" rotate wireframe></a-entity>
+        <a-text value="Cone" align="center" position="0 -1 0" color="white"></a-text>
+      </a-entity>
+
+      <a-entity position="3 2 -5" select-on-hover="target: sphere" class="clickable">
+        <a-entity geometry="primitive: sphere" material="color: #FFFF00; opacity: 0.6" rotate wireframe></a-entity>
+        <a-text value="Esfera" align="center" position="0 -1 0" color="white"></a-text>
+      </a-entity>
+
+      <a-entity position="6 2 -5" select-on-hover="target: cylinder" class="clickable">
+        <a-entity geometry="primitive: cylinder" material="color: #FF00FF; opacity: 0.6" rotate wireframe></a-entity>
+        <a-text value="Cilindro" align="center" position="0 -1 0" color="white"></a-text>
+      </a-entity>
+
+      <!-- Modelos centrais ocultos até seleção -->
+      <a-entity id="tetrahedron" class="model" geometry="primitive: tetrahedron" material="color:#FF0000; opacity:0.6" visible="false"></a-entity>
+      <a-entity id="cube" class="model" geometry="primitive: box" material="color:#00FF00; opacity:0.6" visible="false"></a-entity>
+      <a-entity id="cone" class="model" geometry="primitive: cone" material="color:#0000FF; opacity:0.6" visible="false"></a-entity>
+      <a-entity id="sphere" class="model" geometry="primitive: sphere" material="color:#FFFF00; opacity:0.6" visible="false"></a-entity>
+      <a-entity id="cylinder" class="model" geometry="primitive: cylinder" material="color:#FF00FF; opacity:0.6" visible="false"></a-entity>
+
+      <!-- Informações sobre o sólido selecionado -->
+      <a-text id="solid-info" position="0 -2 -3" align="center" color="white" value=""></a-text>
+
+      <!-- Botão Iniciar (gaze/click) -->
+      <a-entity id="startButtonEntity" position="0 -1 -3">
+        <a-box id="startBox" class="clickable" color="#4CAF50" depth="0.2" height="0.6" width="2"></a-box>
+        <a-entity text="value: Iniciar Quiz; align:center; color:#fff; width:2" position="0 0 0.12"></a-entity>
       </a-entity>
     </a-entity>
+
+    <!-- ===================== QUIZ (inicialmente oculto) ===================== -->
+    <a-entity id="quiz-container" position="0 2.9 -4" visible="false">
+      <a-image id="pergunta-img" position="0 1.5 0" width="3.5" height="1.2"></a-image>
+      <a-entity id="opcoes" position="0 -0.5 0"></a-entity>
+      <a-entity id="feedbackLabel"
+                text="value: ; align: center; color: white; width: 3"
+                position="0 -2 0"></a-entity>
+    </a-entity>
+
   </a-scene>
 
   <script>
+    /* ---------------------------
+       DADOS DO QUIZ (6 perguntas)
+       --------------------------- */
     const quiz = [
       {
         perguntaImg: "figpage/pergunta1.png",
@@ -113,95 +357,110 @@
       }
     ];
 
-    let perguntaAtual = 0;
-    let score = 0;
+    /* ---------------------------
+       SELETORES & VARIÁVEIS
+       --------------------------- */
+    const startBox = document.getElementById("startBox");
+    const telaInicial = document.getElementById("tela-inicial");
+    const quizContainer = document.getElementById("quiz-container");
     const perguntaImgEl = document.getElementById("pergunta-img");
     const opcoesEl = document.getElementById("opcoes");
-    const startButton = document.getElementById("start-button");
-    const quizContainer = document.getElementById("quiz-container");
     const feedbackLabel = document.getElementById("feedbackLabel");
     const scoreLabel = document.getElementById("scoreLabel");
-    const camera = document.getElementById("camera");
 
-    startButton.addEventListener("click", () => {
-      startButton.style.display="none";
-      quizContainer.setAttribute("visible","true");
+    let perguntaAtual = 0;
+    let score = 0;
+
+    /* --- EVENTOS DO BOTÃO INICIAR --- */
+    startBox.addEventListener("mouseenter", () => startBox.setAttribute("color", "#66d966"));
+    startBox.addEventListener("mouseleave", () => startBox.setAttribute("color", "#4CAF50"));
+    startBox.addEventListener("click", () => {
+      // esconde tela inicial e mostra quiz
+      telaInicial.setAttribute("visible", "false");
+      quizContainer.setAttribute("visible", "true");
+      scoreLabel.setAttribute("visible", "true");
+      resetarVisao();
       carregarPergunta();
     });
 
+    /* ---------------------------
+       FUNÇÕES DO QUIZ
+       --------------------------- */
+
     function carregarPergunta(){
-      if(perguntaAtual>=quiz.length){ finalizarQuiz(); return; }
-      const dados=quiz[perguntaAtual];
-      perguntaImgEl.setAttribute("src",dados.perguntaImg);
-      feedbackLabel.setAttribute("text","value: ");
-      opcoesEl.innerHTML="";
+      if (perguntaAtual >= quiz.length) { finalizarQuiz(); return; }
+      const dados = quiz[perguntaAtual];
+      perguntaImgEl.setAttribute("src", dados.perguntaImg);
+      feedbackLabel.setAttribute("text", "value: ");
+      opcoesEl.innerHTML = "";
 
-      const positions = [
-        "-1 0.5 0", "1 0.5 0",
-        "-1 -0.8 0", "1 -0.8 0"
-      ];
+      const positions = ["-1 0.5 0", "1 0.5 0", "-1 -0.8 0", "1 -0.8 0"];
 
-      dados.opcoes.forEach((opcao,i)=>{
-        const img=document.createElement("a-image");
-        img.setAttribute("src",opcao.img);
-        img.setAttribute("width","1.3");
-        img.setAttribute("height","1.3");
+      dados.opcoes.forEach((opcao, i) => {
+        const img = document.createElement("a-image");
+        img.setAttribute("src", opcao.img);
+        img.setAttribute("width", "1.3");
+        img.setAttribute("height", "1.3");
         img.setAttribute("position", positions[i]);
-        img.setAttribute("class","opcao");
-        img.setAttribute("data-resposta",opcao.resposta);
-        img.addEventListener("click",()=>verificarResposta(opcao.resposta,dados.correta));
+        img.setAttribute("class", "opcao clickable");
+        img.setAttribute("data-resposta", opcao.resposta);
+
+        img.addEventListener("mouseenter", () => img.setAttribute("scale", "1.05 1.05 1.05"));
+        img.addEventListener("mouseleave", () => img.setAttribute("scale", "1 1 1"));
+        img.addEventListener("click", () => verificarResposta(opcao.resposta, dados.correta));
+
         opcoesEl.appendChild(img);
       });
+
+      scoreLabel.setAttribute("text", `value: Placar: ${score}`);
     }
 
-    function verificarResposta(selecionada,correta){
-      if(selecionada===correta){
+    function verificarResposta(selecionada, correta){
+      if(selecionada === correta){
         score++;
-        scoreLabel.setAttribute("text",`value: Placar: ${score}`);
-        feedbackLabel.setAttribute("text","value: ✔ Correto!; color: lime");
+        scoreLabel.setAttribute("text", `value: Placar: ${score}`);
+        feedbackLabel.setAttribute("text", "value: ✔ Correto!; color: lime");
         perguntaAtual++;
         resetarVisao();
-        setTimeout(carregarPergunta,1500);
-      }else{
-        feedbackLabel.setAttribute("text","value: ✘ Incorreto!; color: red");
+        setTimeout(carregarPergunta, 1200);
+      } else {
+        feedbackLabel.setAttribute("text", "value: ✘ Incorreto!; color: red");
         resetarVisao();
       }
     }
 
     function finalizarQuiz(){
-      perguntaImgEl.setAttribute("src","figpage/final.png");
-      opcoesEl.innerHTML="";
-      feedbackLabel.setAttribute("text",`value: Quiz finalizado! Placar: ${score}/${quiz.length}; color: yellow`);
+      perguntaImgEl.setAttribute("src", "figpage/final.png");
+      opcoesEl.innerHTML = "";
+      feedbackLabel.setAttribute("text", `value: Quiz finalizado! Placar: ${score}/${quiz.length}; color: yellow`);
 
       // Botão reinício
-      const btn=document.createElement("a-box");
-      btn.setAttribute("color","#4CAF50");
-      btn.setAttribute("depth","0.2");
-      btn.setAttribute("height","0.6");
-      btn.setAttribute("width","2");
-      btn.setAttribute("position","0 -3 0");
-      btn.setAttribute("class","reiniciar");
+      const btn = document.createElement("a-box");
+      btn.setAttribute("color", "#4CAF50");
+      btn.setAttribute("depth", "0.2");
+      btn.setAttribute("height", "0.6");
+      btn.setAttribute("width", "2");
+      btn.setAttribute("position", "0 -3 0");
+      btn.setAttribute("class", "reiniciar clickable");
 
-      const txt=document.createElement("a-entity");
-      txt.setAttribute("text","value: Reiniciar; align: center; color: white; width: 3");
-      txt.setAttribute("position","0 0 0.2");
+      const txt = document.createElement("a-entity");
+      txt.setAttribute("text", "value: Reiniciar; align: center; color: white; width: 3");
+      txt.setAttribute("position", "0 0 0.12");
       btn.appendChild(txt);
 
+      btn.addEventListener("mouseenter", () => btn.setAttribute("color", "#66d966"));
+      btn.addEventListener("mouseleave", () => btn.setAttribute("color", "#4CAF50"));
       btn.addEventListener("click", reiniciarQuiz);
+
       opcoesEl.appendChild(btn);
     }
 
     function reiniciarQuiz(){
-      perguntaAtual=0;
-      score=0;
-      scoreLabel.setAttribute("text","value: Placar: 0");
+      perguntaAtual = 0;
+      score = 0;
+      scoreLabel.setAttribute("text", "value: Placar: 0");
+      resetarVisao();
       carregarPergunta();
-    }
-
-    function resetarVisao(){
-      // Reposiciona visão ao centro
-      camera.components["look-controls"].pitchObject.rotation.x=0;
-      camera.components["look-controls"].yawObject.rotation.y=0;
     }
   </script>
 </body>
